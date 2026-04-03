@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate Resources/Assets.xcassets/AppIcon.appiconset from Resources/AppIcon.icon
 # (Icon Composer bundle). Requires Icon Composer (usually from Additional Tools for Xcode).
+#
+# Place the Icon Composer document AppIcon.icon in Resources/ (e.g. drag it from Icon Composer
+# into that folder) before running, or pass its path as the first argument.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -100,4 +103,6 @@ cat > "$APPICONSET/Contents.json" <<'EOF'
 }
 EOF
 
-echo "Updated $APPICONSET ($(ls -1 "$APPICONSET"/icon_*.png 2>/dev/null | wc -l | tr -d ' ') png files + Contents.json)"
+shopt -s nullglob
+png_files=("$APPICONSET"/icon_*.png)
+echo "Updated $APPICONSET (${#png_files[@]} png files + Contents.json)"
