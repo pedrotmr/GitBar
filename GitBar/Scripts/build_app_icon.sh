@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerate Resources/Assets.xcassets/AppIcon.appiconset from Resources/AppIcon.icon
-# (Icon Composer bundle). Requires Xcode with Icon Composer (ictool).
+# (Icon Composer bundle). Requires Icon Composer (usually from Additional Tools for Xcode).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -9,14 +9,36 @@ cd "$ROOT"
 ICON_SRC="${1:-$ROOT/Resources/AppIcon.icon}"
 APPICONSET="$ROOT/Resources/Assets.xcassets/AppIcon.appiconset"
 OUT_ROOT="$ROOT/build/icon-gen"
-XCODE_APP="${XCODE_APP:-/Applications/Xcode.app}"
-
-ICTOOL="$XCODE_APP/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
-if [[ ! -x "$ICTOOL" ]]; then
-  ICTOOL="$XCODE_APP/Contents/Applications/Icon Composer.app/Contents/Executables/icontool"
+XCODE_DEV_DIR="$(xcode-select -p 2>/dev/null || true)"
+if [[ -z "${XCODE_APP:-}" ]]; then
+  if [[ -n "$XCODE_DEV_DIR" ]]; then
+    XCODE_APP="${XCODE_DEV_DIR%/Contents/Developer}"
+  else
+    XCODE_APP="/Applications/Xcode.app"
+  fi
 fi
-if [[ ! -x "$ICTOOL" ]]; then
-  echo "ictool/icontool not found. Install Xcode and Icon Composer, or set XCODE_APP." >&2
+
+declare -a ictool_candidates=()
+if [[ -n "${ICTOOL:-}" ]]; then
+  ictool_candidates+=("$ICTOOL")
+fi
+ictool_candidates+=(
+  "$XCODE_APP/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+  "$XCODE_APP/Contents/Applications/Icon Composer.app/Contents/Executables/icontool"
+  "/Applications/Additional Tools/Graphics/Icon Composer.app/Contents/Executables/ictool"
+  "/Applications/Additional Tools/Graphics/Icon Composer.app/Contents/Executables/icontool"
+)
+
+ICTOOL=""
+for candidate in "${ictool_candidates[@]}"; do
+  if [[ -x "$candidate" ]]; then
+    ICTOOL="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$ICTOOL" ]]; then
+  echo "ictool/icontool not found. Install Additional Tools for Xcode (Icon Composer), set XCODE_APP, or set ICTOOL." >&2
   exit 1
 fi
 
@@ -25,9 +47,9 @@ if [[ ! -d "$ICON_SRC" ]]; then
   exit 1
 fi
 
-ICONSET_DIR="$OUT_ROOT/AppIcon.iconset"
 TMP_DIR="$OUT_ROOT/tmp"
-mkdir -p "$ICONSET_DIR" "$TMP_DIR" "$APPICONSET"
+mkdir -p "$TMP_DIR" "$APPICONSET"
+rm -f "$APPICONSET"/icon_*.png
 
 MASTER_ART="$TMP_DIR/icon_art_824.png"
 MASTER_1024="$TMP_DIR/icon_1024.png"
@@ -37,22 +59,45 @@ MASTER_1024="$TMP_DIR/icon_1024.png"
 
 sips --padToHeightWidth 1024 1024 "$MASTER_ART" --out "$MASTER_1024" >/dev/null
 
-sizes=(16 32 64 128 256 512 1024)
-for sz in "${sizes[@]}"; do
-  out="$ICONSET_DIR/icon_${sz}x${sz}.png"
-  sips -z "$sz" "$sz" "$MASTER_1024" --out "$out" >/dev/null
-  if [[ "$sz" -ne 1024 ]]; then
-    dbl=$((sz * 2))
-    out2="$ICONSET_DIR/icon_${sz}x${sz}@2x.png"
-    sips -z "$dbl" "$dbl" "$MASTER_1024" --out "$out2" >/dev/null
+icon_specs=(
+  "16:icon_16x16.png"
+  "32:icon_16x16@2x.png"
+  "32:icon_32x32.png"
+  "64:icon_32x32@2x.png"
+  "128:icon_128x128.png"
+  "256:icon_128x128@2x.png"
+  "256:icon_256x256.png"
+  "512:icon_256x256@2x.png"
+  "512:icon_512x512.png"
+  "1024:icon_512x512@2x.png"
+)
+for spec in "${icon_specs[@]}"; do
+  size="${spec%%:*}"
+  filename="${spec#*:}"
+  out="$APPICONSET/$filename"
+  if [[ "$size" -eq 1024 ]]; then
+    cp "$MASTER_1024" "$out"
+  else
+    sips -z "$size" "$size" "$MASTER_1024" --out "$out" >/dev/null
   fi
 done
 
-cp "$MASTER_1024" "$ICONSET_DIR/icon_512x512@2x.png"
+cat > "$APPICONSET/Contents.json" <<'EOF'
+{
+  "images" : [
+    { "filename" : "icon_16x16.png", "idiom" : "mac", "scale" : "1x", "size" : "16x16" },
+    { "filename" : "icon_16x16@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "16x16" },
+    { "filename" : "icon_32x32.png", "idiom" : "mac", "scale" : "1x", "size" : "32x32" },
+    { "filename" : "icon_32x32@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "32x32" },
+    { "filename" : "icon_128x128.png", "idiom" : "mac", "scale" : "1x", "size" : "128x128" },
+    { "filename" : "icon_128x128@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "128x128" },
+    { "filename" : "icon_256x256.png", "idiom" : "mac", "scale" : "1x", "size" : "256x256" },
+    { "filename" : "icon_256x256@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "256x256" },
+    { "filename" : "icon_512x512.png", "idiom" : "mac", "scale" : "1x", "size" : "512x512" },
+    { "filename" : "icon_512x512@2x.png", "idiom" : "mac", "scale" : "2x", "size" : "512x512" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}
+EOF
 
-# Install into asset catalog (overwrite PNGs only)
-cp "$ICONSET_DIR"/*.png "$APPICONSET/"
-# Asset catalog only references the standard 10 slots; drop intermediate sizes from iconutil-style set.
-rm -f "$APPICONSET/icon_64x64.png" "$APPICONSET/icon_64x64@2x.png" "$APPICONSET/icon_1024x1024.png"
-
-echo "Updated $APPICONSET ($(ls -1 "$APPICONSET"/*.png 2>/dev/null | wc -l | tr -d ' ') png files)"
+echo "Updated $APPICONSET ($(ls -1 "$APPICONSET"/icon_*.png 2>/dev/null | wc -l | tr -d ' ') png files + Contents.json)"
