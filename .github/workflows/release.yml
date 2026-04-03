@@ -17,6 +17,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name || inputs.tag || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   release:
     runs-on: macos-15
