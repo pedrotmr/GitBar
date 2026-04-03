@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build/release (for example v1.2.3)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Resolve release tag
+        id: ctx
+        run: |
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            release_tag="${{ github.event.release.tag_name }}"
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            release_tag="${{ inputs.tag }}"
+          else
+            release_tag="${{ github.ref_name }}"
+          fi
+
+          if [[ -z "$release_tag" ]]; then
+            echo "::error::Unable to resolve release tag."
+            exit 1
+          fi
+
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.ctx.outputs.release_tag }}
+          fetch-depth: 0
+          lfs: true
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16"
+
+      - name: Select release mode
+        id: mode
+        run: |
+          if [[ -n "${{ secrets.APPLE_ID }}" && -n "${{ secrets.APPLE_TEAM_ID }}" && -n "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" && -n "${{ secrets.DEV_ID_CERT_BASE64 }}" && -n "${{ secrets.DEV_ID_CERT_PASSWORD }}" ]]; then
+            echo "release_mode=production" >> "$GITHUB_OUTPUT"
+            echo "appcast_filename=appcast.xml" >> "$GITHUB_OUTPUT"
+            echo "feed_url=https://github.com/${{ github.repository }}/releases/latest/download/appcast.xml" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_mode=preview" >> "$GITHUB_OUTPUT"
+            echo "appcast_filename=appcast-preview.xml" >> "$GITHUB_OUTPUT"
+            echo "feed_url=https://github.com/${{ github.repository }}/releases/latest/download/appcast-preview.xml" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import Developer ID certificate
+        if: steps.mode.outputs.release_mode == 'production'
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.DEV_ID_CERT_BASE64 }}
+          p12-password: ${{ secrets.DEV_ID_CERT_PASSWORD }}
+
+      - name: Build archive
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
+          APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
+          SPARKLE_FEED_URL: ${{ vars.SPARKLE_FEED_URL || steps.mode.outputs.feed_url }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY || secrets.SPARKLE_PUBLIC_KEY }}
+        run: Scripts/release/build.sh
+
+      - name: Package artifacts
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
+          APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
+        run: Scripts/release/package.sh
+
+      - name: Notarize (production only)
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: Scripts/release/notarize.sh
+
+      - name: Generate appcast
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
+          APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_DOWNLOAD_URL_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ steps.ctx.outputs.release_tag }}
+          SPARKLE_RELEASE_NOTES_URL_PREFIX: https://github.com/${{ github.repository }}/releases/tag/${{ steps.ctx.outputs.release_tag }}
+        run: Scripts/release/appcast.sh
+
+      - name: Stage publish assets
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
+          APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
+        run: Scripts/release/publish.sh
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ctx.outputs.release_tag }}
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            build/release/dist/*.zip
+            build/release/dist/*.dmg
+            build/release/dist/${{ steps.mode.outputs.appcast_filename }}
