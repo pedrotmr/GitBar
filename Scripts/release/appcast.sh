@@ -5,6 +5,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 require_cmd xcodebuild
+require_cmd curl
 ensure_dirs
 
 [[ -f "$ZIP_PATH" ]] || fail "zip archive not found at $ZIP_PATH; run package.sh first"
@@ -70,6 +71,12 @@ else
 fi
 
 cp "$APPCAST_ARCHIVES_DIR/$APPCAST_FILENAME" "$APPCAST_PATH"
+
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  log "skipping enclosure URL HTTP check here (CI uploads assets after this step); run verify_appcast_enclosures.sh after release"
+else
+  verify_appcast_enclosure_urls "$APPCAST_PATH"
+fi
 
 log "appcast generated at $APPCAST_PATH"
 write_github_output "appcast_path" "$APPCAST_PATH"

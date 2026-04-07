@@ -18,6 +18,13 @@ cp "$ZIP_PATH" "$PUBLISH_DIR/assets/"
 cp "$DMG_PATH" "$PUBLISH_DIR/assets/"
 cp "$APPCAST_PATH" "$PUBLISH_DIR/assets/"
 
+# Older production builds shipped with SUFeedURL pointing at appcast-preview.xml while CI only attached appcast.xml.
+if [[ "$RELEASE_MODE" == "production" && "$(basename "$APPCAST_PATH")" == "appcast.xml" ]]; then
+  cp "$APPCAST_PATH" "$DIST_DIR/appcast-preview.xml"
+  cp "$DIST_DIR/appcast-preview.xml" "$PUBLISH_DIR/assets/"
+  log "also staged appcast-preview.xml (identical to appcast.xml) for legacy Sparkle feed URLs"
+fi
+
 cat > "$PUBLISH_DIR/release-metadata.json" <<META
 {
   "app": "${APP_NAME}",
@@ -26,7 +33,10 @@ cat > "$PUBLISH_DIR/release-metadata.json" <<META
   "assets": [
     "$(basename "$ZIP_PATH")",
     "$(basename "$DMG_PATH")",
-    "$(basename "$APPCAST_PATH")"
+    "$(basename "$APPCAST_PATH")"$(
+      [[ "$RELEASE_MODE" == "production" && -f "$DIST_DIR/appcast-preview.xml" ]] \
+        && printf ',\n    "appcast-preview.xml"'
+    )
   ]
 }
 META

@@ -35,13 +35,7 @@ if [[ -n "${GITHUB_REF_NAME:-}" ]]; then
 elif [[ -n "${RELEASE_VERSION:-}" ]]; then
   VERSION_TAG=$RELEASE_VERSION
 else
-  if [[ -f "$ROOT_DIR/Info.plist" ]]; then
-    VERSION_TAG=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ROOT_DIR/Info.plist")
-  elif [[ -f "$ROOT_DIR/$XCODE_PROJECT/project.pbxproj" ]]; then
-    VERSION_TAG=$(awk -F' = ' '/MARKETING_VERSION = / { gsub(/;$/, "", $2); print $2; exit }' "$ROOT_DIR/$XCODE_PROJECT/project.pbxproj")
-  else
-    VERSION_TAG="0.1.0"
-  fi
+  VERSION_TAG=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$ROOT_DIR/Info.plist")
 fi
 
 ZIP_PATH=${ZIP_PATH:-$DIST_DIR/${APP_NAME}-${VERSION_TAG}.zip}
@@ -72,4 +66,59 @@ write_github_output() {
 
 ensure_dirs() {
   mkdir -p "$RELEASE_DIR" "$DIST_DIR" "$TOOLS_DIR" "$APPCAST_ARCHIVES_DIR"
+}
+
+# Enclosure URLs must return HTTP 200. In GitHub Actions, appcast runs before release assets exist,
+# so appcast.sh skips this when GITHUB_ACTIONS is set; run verify_appcast_enclosures.sh after upload.
+verify_appcast_enclosure_urls() {
+  local appcast_file=$1
+  require_cmd curl
+
+  local -a enclosure_urls
+  mapfile -t enclosure_urls < <(sed -n 's/.*enclosure url="\([^"]*\)".*/\1/p' "$appcast_file")
+  [[ "${#enclosure_urls[@]}" -gt 0 ]] || fail "appcast has no enclosure URLs: $appcast_file"
+
+  local enclosure_url http_code
+  for enclosure_url in "${enclosure_urls[@]}"; do
+    if [[ -n "${GITHUB_REF_NAME:-}" && "$enclosure_url" == *"/releases/download/"* ]]; then
+      [[ "$enclosure_url" == *"/releases/download/${GITHUB_REF_NAME}/"* ]] \
+        || fail "appcast enclosure URL missing release tag path (${GITHUB_REF_NAME}): $enclosure_url"
+    fi
+
+    http_code=$(curl -sS -L -o /dev/null -w '%{http_code}' "$enclosure_url" || true)
+    [[ "$http_code" == "200" ]] || fail "appcast enclosure URL is not downloadable (HTTP $http_code): $enclosure_url"
+  done
+}
+
+# Before xcodebuild: set CFBundleShortVersionString / CFBundleVersion from the git tag so Sparkle
+# and GitHub release tags stay aligned (source Info.plist can stay at a dev default).
+sync_info_plist_version_from_tag() {
+  [[ "${RELEASE_SKIP_VERSION_SYNC:-}" == "1" ]] && return 0
+  [[ -z "${GITHUB_REF_NAME:-}" ]] && return 0
+  # Require v1.x style tags (v + digit), e.g. v1.2.3 or v1.0
+  [[ "$GITHUB_REF_NAME" =~ ^v[0-9] ]] || return 0
+
+  require_cmd /usr/libexec/PlistBuddy
+
+  local short=$VERSION_TAG
+  local build
+
+  if [[ -n "${GITHUB_RUN_NUMBER:-}" ]]; then
+    build="$GITHUB_RUN_NUMBER"
+  else
+    build=$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || true)
+    if [[ -z "$build" ]]; then
+      build=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$ROOT_DIR/Info.plist" 2>/dev/null || echo "1")
+    fi
+  fi
+
+  log "syncing Info.plist versions from tag (Sparkle): CFBundleShortVersionString=$short CFBundleVersion=$build (tag=$GITHUB_REF_NAME)"
+
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $short" "$ROOT_DIR/Info.plist" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $short" "$ROOT_DIR/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build" "$ROOT_DIR/Info.plist" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $build" "$ROOT_DIR/Info.plist"
+
+  write_github_output "cf_bundle_short_version_string" "$short"
+  write_github_output "cf_bundle_version" "$build"
 }

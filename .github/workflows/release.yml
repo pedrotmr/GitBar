@@ -17,10 +17,6 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name || inputs.tag || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
   release:
     runs-on: macos-15
@@ -126,4 +122,10 @@ jobs:
           files: |
             build/release/dist/*.zip
             build/release/dist/*.dmg
-            build/release/dist/${{ steps.mode.outputs.appcast_filename }}
+            build/release/dist/*.xml
+
+      - name: Verify appcast enclosure URLs
+        env:
+          GITHUB_REF_NAME: ${{ steps.ctx.outputs.release_tag }}
+          APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
+        run: Scripts/release/verify_appcast_enclosures.sh
