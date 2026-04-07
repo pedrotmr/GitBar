@@ -74,8 +74,12 @@ verify_appcast_enclosure_urls() {
   local appcast_file=$1
   require_cmd curl
 
-  local -a enclosure_urls
-  mapfile -t enclosure_urls < <(sed -n 's/.*enclosure url="\([^"]*\)".*/\1/p' "$appcast_file")
+  # macOS ships Bash 3.2 (no mapfile); use read loop for enclosure lines.
+  local -a enclosure_urls=()
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -n "$line" ]] && enclosure_urls+=("$line")
+  done < <(sed -n 's/.*enclosure url="\([^"]*\)".*/\1/p' "$appcast_file")
   [[ "${#enclosure_urls[@]}" -gt 0 ]] || fail "appcast has no enclosure URLs: $appcast_file"
 
   local enclosure_url http_code

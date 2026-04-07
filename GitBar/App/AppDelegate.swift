@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var popover: NSPopover?
     private var gitService = GitService()
     private var settingsService = SettingsService()
+    private var updateService = UpdateService()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -26,6 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: ContentView()
                 .environment(gitService)
                 .environment(settingsService)
+                .environment(updateService)
         )
         self.popover = popover
 
@@ -34,6 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await gitService.refresh() }
         }
         gitService.autoFetchEnabled = settingsService.autoFetchEnabled
+        Task { await updateService.checkForUpdatesIfNeeded() }
     }
 
     @objc func togglePopover() {
@@ -46,6 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
                 gitService.isPopoverVisible = true
+                Task { await updateService.checkForUpdatesIfNeeded() }
             }
         }
     }

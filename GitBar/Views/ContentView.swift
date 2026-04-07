@@ -471,6 +471,7 @@ struct IconButton: View {
 
 struct BottomBar: View {
     @Environment(GitService.self) private var gitService
+    @Environment(UpdateService.self) private var updateService
     let onSettings: () -> Void
 
     var body: some View {
@@ -486,6 +487,13 @@ struct BottomBar: View {
             }
             .disabled(gitService.repoPath.isEmpty || gitService.isLoading)
 
+            if updateService.isUpdateAvailable {
+                IconButton(systemImage: "arrow.down.circle", tooltip: updateTooltip) {
+                    Task { await updateService.installLatestUpdate() }
+                }
+                .disabled(updateService.isInstallingUpdate)
+            }
+
             IconButton(systemImage: "gearshape", tooltip: "Settings") {
                 onSettings()
             }
@@ -496,5 +504,12 @@ struct BottomBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var updateTooltip: String {
+        if let latestVersion = updateService.latestVersion {
+            return "Update available (\(latestVersion))"
+        }
+        return "Update available"
     }
 }
