@@ -102,7 +102,7 @@ jobs:
           RELEASE_MODE: ${{ steps.mode.outputs.release_mode }}
           APPCAST_FILENAME: ${{ steps.mode.outputs.appcast_filename }}
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          SPARKLE_DOWNLOAD_URL_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ steps.ctx.outputs.release_tag }}
+          SPARKLE_DOWNLOAD_URL_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ steps.ctx.outputs.release_tag }}/
           SPARKLE_RELEASE_NOTES_URL_PREFIX: https://github.com/${{ github.repository }}/releases/tag/${{ steps.ctx.outputs.release_tag }}
         run: Scripts/release/appcast.sh
 

@@ -43,6 +43,10 @@ if [[ -z "$SPARKLE_DOWNLOAD_URL_PREFIX" ]]; then
   fi
 fi
 
+# generate_appcast treats the download prefix as a base URL; without a trailing slash
+# the last path segment can be replaced when appending the archive filename.
+SPARKLE_DOWNLOAD_URL_PREFIX="${SPARKLE_DOWNLOAD_URL_PREFIX%/}/"
+
 GENERATE_APPCAST=$(build_generate_appcast)
 
 rm -rf "$APPCAST_ARCHIVES_DIR"
