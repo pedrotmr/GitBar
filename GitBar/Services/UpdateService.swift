@@ -249,7 +249,7 @@ final class UpdateService {
         /bin/rm -rf "$STAGING"
         /usr/bin/ditto "$SOURCE" "$STAGING"
         # rename is atomic on the same filesystem — no window for TOCTOU
-        /usr/bin/python3 -c "import os; os.rename('${STAGING}', '${TARGET}')" 2>/dev/null || {
+        /usr/bin/python3 -c "import os, sys; os.rename(sys.argv[1], sys.argv[2])" "$STAGING" "$TARGET" 2>/dev/null || {
             /bin/rm -rf "$TARGET"
             /bin/mv "$STAGING" "$TARGET"
         }
