@@ -1,11 +1,30 @@
 import Foundation
 import Observation
 
+private struct RepoSnapshot {
+    let branches: [Branch]
+    let worktrees: [Worktree]
+    let stashes: [Stash]
+    let pullRequests: [PullRequest]
+    let cachedOwnerRepo: String?
+    let cachedUsername: String?
+}
+
 @MainActor
 @Observable
 class GitService {
     var repoPath: String = "" {
-        didSet { setupWatcher() }
+        didSet {
+            guard oldValue != repoPath else {
+                setupWatcher()
+                return
+            }
+            if !oldValue.isEmpty {
+                persistSnapshot(for: oldValue)
+            }
+            applyRepoSelection(path: repoPath)
+            setupWatcher()
+        }
     }
     var branches: [Branch] = []
     var worktrees: [Worktree] = []
@@ -23,36 +42,133 @@ class GitService {
 
     private var watcher: GitRepositoryWatcher?
     private var fetchTimer: Timer?
+    private var isMutating = false
+
+    /// Last selection restored from in-memory cache (switching repos); drives silent revalidation vs full load UI.
+    private var restoredFromCache = false
+
+    /// No snapshot for this path yet — use blocking refresh on first load (even if the popover opens later).
+    private var awaitingFirstFetch = false
+
+    /// In-memory snapshots so switching back to a recent repo shows data immediately without blocking spinners.
+    private var repoCache: [String: RepoSnapshot] = [:]
+
+    // Cached per-repo values for PR fetches (P4)
+    private var cachedOwnerRepo: String?
+    private var cachedUsername: String?
+
+    private func cacheKey(_ path: String) -> String {
+        (path as NSString).standardizingPath
+    }
+
+    private func persistSnapshot(for path: String) {
+        let key = cacheKey(path)
+        guard !key.isEmpty else { return }
+        repoCache[key] = RepoSnapshot(
+            branches: branches,
+            worktrees: worktrees,
+            stashes: stashes,
+            pullRequests: pullRequests,
+            cachedOwnerRepo: cachedOwnerRepo,
+            cachedUsername: cachedUsername
+        )
+    }
+
+    private func applyRepoSelection(path: String) {
+        restoredFromCache = false
+        awaitingFirstFetch = false
+        if path.isEmpty {
+            branches = []
+            worktrees = []
+            stashes = []
+            pullRequests = []
+            cachedOwnerRepo = nil
+            cachedUsername = nil
+            return
+        }
+        let key = cacheKey(path)
+        if let snap = repoCache[key] {
+            branches = snap.branches
+            worktrees = snap.worktrees
+            stashes = snap.stashes
+            pullRequests = snap.pullRequests
+            cachedOwnerRepo = snap.cachedOwnerRepo
+            cachedUsername = snap.cachedUsername
+            restoredFromCache = true
+        } else {
+            branches = []
+            worktrees = []
+            stashes = []
+            pullRequests = []
+            cachedOwnerRepo = nil
+            cachedUsername = nil
+            awaitingFirstFetch = true
+        }
+    }
+
+    /// P1: Run all independent fetches in parallel (shared by blocking refresh and silent refresh).
+    private func runFullFetch() async {
+        async let b: Void = fetchBranches()
+        async let w: Void = fetchWorktrees()
+        async let s: Void = fetchStashes()
+        async let p: Void = fetchPullRequests()
+        _ = await (b, w, s, p)
+    }
 
     func refresh() async {
         guard !repoPath.isEmpty else { return }
         isLoading = true
         errorMessage = nil
-        await fetchBranches()
-        await fetchWorktrees()
-        await fetchStashes()
-        await fetchPullRequests()
+        await runFullFetch()
         isLoading = false
+        awaitingFirstFetch = false
+        persistSnapshot(for: repoPath)
     }
 
-    private func runGit(_ args: [String], at path: String? = nil) async -> ShellResult {
+    /// Re-fetch without tab-level loading spinners (repo revisited from cache, file watcher, auto-fetch, worktree delete).
+    private func refreshSilently() async {
+        guard !repoPath.isEmpty else { return }
+        errorMessage = nil
+        await runFullFetch()
+        awaitingFirstFetch = false
+        persistSnapshot(for: repoPath)
+    }
+
+    /// Called after the user selects a repo while the popover is open.
+    func refreshAfterRepoSelection() async {
+        guard !repoPath.isEmpty else { return }
+        let fromCache = restoredFromCache
+        restoredFromCache = false
+        isDirty = false
+        if fromCache {
+            await refreshSilently()
+        } else {
+            await refresh()
+        }
+    }
+
+    private func runGit(_ args: [String], at path: String? = nil, timeout: TimeInterval = ShellExecutor.defaultTimeout) async -> ShellResult {
         let executionPath = path ?? self.repoPath
-        return await Task.detached {
-            ShellExecutor.run(args, at: executionPath)
-        }.value
+        return await ShellExecutor.run(args, at: executionPath, timeout: timeout)
     }
 
-    private func runGH(_ args: [String]) async -> ShellResult {
+    private func runGH(_ args: [String], timeout: TimeInterval = ShellExecutor.defaultTimeout) async -> ShellResult {
         let path = self.repoPath
-        return await Task.detached {
-            ShellExecutor.run("gh", args, at: path)
-        }.value
+        return await ShellExecutor.run("gh", args, at: path, timeout: timeout)
+    }
+
+    private func appendError(_ message: String) {
+        if let existing = errorMessage {
+            errorMessage = existing + "\n" + message
+        } else {
+            errorMessage = message
+        }
     }
 
     func fetchBranches() async {
         let result = await runGit(["branch", "--format=%(refname:short) %(HEAD)"])
         guard result.exitCode == 0 else {
-            errorMessage = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            appendError(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
             return
         }
         branches = result.stdout
@@ -68,7 +184,7 @@ class GitService {
     func fetchWorktrees() async {
         let result = await runGit(["worktree", "list", "--porcelain"])
         guard result.exitCode == 0 else {
-            errorMessage = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            appendError(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
             return
         }
 
@@ -112,7 +228,7 @@ class GitService {
     func fetchStashes() async {
         let result = await runGit(["stash", "list", "--format=%gd%x1f%gs"])
         guard result.exitCode == 0 else {
-            errorMessage = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            appendError(result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
             return
         }
 
@@ -127,42 +243,42 @@ class GitService {
     }
 
     func fetchPullRequests() async {
-        // Resolve GitHub owner/repo from git remote
-        let remoteResult = await runGit(["remote", "get-url", "origin"])
-        guard remoteResult.exitCode == 0,
-              let ownerRepo = parseGitHubOwnerRepo(from: remoteResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
-        else {
-            pullRequests = []
-            return
+        // Use cached owner/repo, resolve only if needed
+        let ownerRepo: String
+        if let cached = cachedOwnerRepo {
+            ownerRepo = cached
+        } else {
+            let remoteResult = await runGit(["remote", "get-url", "origin"])
+            guard remoteResult.exitCode == 0,
+                  let parsed = parseGitHubOwnerRepo(from: remoteResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+            else {
+                pullRequests = []
+                return
+            }
+            cachedOwnerRepo = parsed
+            ownerRepo = parsed
         }
 
-        // Get authenticated GitHub username
-        let userResult = await runGH(["api", "user", "--jq", ".login"])
-        guard userResult.exitCode == 0 else {
-            pullRequests = []
-            return
-        }
-        let username = userResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !username.isEmpty else {
-            pullRequests = []
-            return
-        }
-
-        // Fetch open PRs
-        let prResult = await runGH([
-            "pr", "list",
-            "--repo", ownerRepo,
-            "--state", "open",
-            "--json", "number,title,headRefName,url,author,assignees,reviewRequests",
-            "--limit", "100"
-        ])
-        guard prResult.exitCode == 0,
-              let data = prResult.stdout.data(using: .utf8)
-        else {
-            pullRequests = []
-            return
+        // P4: Use cached username, resolve only if needed
+        let username: String
+        if let cached = cachedUsername {
+            username = cached
+        } else {
+            let userResult = await runGH(["api", "user", "--jq", ".login"])
+            guard userResult.exitCode == 0 else {
+                pullRequests = []
+                return
+            }
+            let resolved = userResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !resolved.isEmpty else {
+                pullRequests = []
+                return
+            }
+            cachedUsername = resolved
+            username = resolved
         }
 
+        // Fetch open PRs and review-requested PRs in parallel
         struct GHUser: Codable { let login: String }
         struct GHReviewRequest: Codable {
             let requestedReviewer: GHUser?
@@ -181,20 +297,16 @@ class GitService {
             let assignees: [GHUser]
             let reviewRequests: [GHReviewRequest]
         }
-
-        let raw: [GHPRResponse]
-        do {
-            raw = try JSONDecoder().decode([GHPRResponse].self, from: data)
-        } catch {
-            errorMessage = "Failed to parse PRs: \(error.localizedDescription)"
-            pullRequests = []
-            return
-        }
-
-        // Fetch review-requested PRs using GitHub's server-side search, which handles
-        // team review requests (not just individual ones)
         struct GHPRSimple: Codable { let number: Int }
-        let reviewReqResult = await runGH([
+
+        async let prResultTask = runGH([
+            "pr", "list",
+            "--repo", ownerRepo,
+            "--state", "open",
+            "--json", "number,title,headRefName,url,author,assignees,reviewRequests",
+            "--limit", "100"
+        ])
+        async let reviewReqResultTask = runGH([
             "pr", "list",
             "--repo", ownerRepo,
             "--state", "open",
@@ -202,6 +314,25 @@ class GitService {
             "--json", "number",
             "--limit", "500"
         ])
+
+        let (prResult, reviewReqResult) = await (prResultTask, reviewReqResultTask)
+
+        guard prResult.exitCode == 0,
+              let data = prResult.stdout.data(using: .utf8)
+        else {
+            pullRequests = []
+            return
+        }
+
+        let raw: [GHPRResponse]
+        do {
+            raw = try JSONDecoder().decode([GHPRResponse].self, from: data)
+        } catch {
+            appendError("Failed to parse PRs: \(error.localizedDescription)")
+            pullRequests = []
+            return
+        }
+
         var reviewRequestedNumbers = Set<Int>()
         if reviewReqResult.exitCode == 0,
            let reviewData = reviewReqResult.stdout.data(using: .utf8) {
@@ -209,10 +340,8 @@ class GitService {
                 let reviewRaw = try JSONDecoder().decode([GHPRSimple].self, from: reviewData)
                 reviewRequestedNumbers = Set(reviewRaw.map(\.number))
             } catch {
-                print("[GitBar] Failed to parse team review requests: \(error.localizedDescription)")
+                appendError("Failed to parse team review requests: \(error.localizedDescription)")
             }
-        } else if reviewReqResult.exitCode != 0 {
-            print("[GitBar] Failed to fetch team review requests (exit \(reviewReqResult.exitCode)): \(reviewReqResult.stderr)")
         }
 
         var created = [PullRequest]()
@@ -248,9 +377,9 @@ class GitService {
     }
 
     func checkoutPRBranch(_ pr: PullRequest) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
         let fetchResult = await runGit(["fetch", "origin", pr.headRefName])
         guard fetchResult.exitCode == 0 else {
             errorMessage = fetchResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -265,9 +394,9 @@ class GitService {
     }
 
     func switchBranch(_ name: String) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
         let result = await runGit(["checkout", name])
         if result.exitCode == 0 {
             await fetchBranches()
@@ -277,9 +406,9 @@ class GitService {
     }
 
     func deleteBranch(_ name: String, force: Bool = false) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
         let flag = force ? "-D" : "-d"
         let result = await runGit(["branch", flag, name])
         if result.exitCode == 0 {
@@ -289,23 +418,30 @@ class GitService {
         }
     }
 
+    // R4: Report remote deletion failure instead of silently ignoring
     func deleteLocalAndRemoteBranch(_ name: String) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
-        _ = await runGit(["push", "origin", "--delete", name])
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
+        let remoteResult = await runGit(["push", "origin", "--delete", name])
+        if remoteResult.exitCode != 0 {
+            let remoteError = remoteResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remoteError.isEmpty {
+                appendError("Remote deletion failed: \(remoteError)")
+            }
+        }
         let localResult = await runGit(["branch", "-D", name])
         if localResult.exitCode == 0 {
             await fetchBranches()
         } else {
-            errorMessage = localResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            appendError(localResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 
     func deleteWorktreeAndBranch(_ worktree: Worktree) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
         let removeResult = await runGit(["worktree", "remove", "--force", worktree.path])
         guard removeResult.exitCode == 0 else {
             errorMessage = removeResult.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -318,7 +454,7 @@ class GitService {
                 return
             }
         }
-        await refresh()
+        await refreshSilently()
     }
 
     func applyStash(_ ref: String) async {
@@ -334,13 +470,14 @@ class GitService {
     }
 
     private func runStashCommand(_ command: String, ref: String) async {
-        guard !isLoading else { return }
-        isLoading = true
-        defer { isLoading = false }
+        guard !isMutating else { return }
+        isMutating = true
+        defer { isMutating = false }
         errorMessage = nil
         let result = await runGit(["stash", command, ref])
         if result.exitCode == 0 {
-            await refresh()
+            await fetchStashes()
+            persistSnapshot(for: repoPath)
         } else {
             errorMessage = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -359,15 +496,20 @@ class GitService {
     func refreshIfNeeded() async {
         guard isDirty else { return }
         isDirty = false
-        await refresh()
+        if awaitingFirstFetch {
+            await refresh()
+        } else {
+            await refreshSilently()
+        }
     }
 
     private func setupWatcher() {
         watcher?.stop()
         guard !repoPath.isEmpty else { watcher = nil; return }
         watcher = GitRepositoryWatcher { [weak self] in
-            guard let self else { return }
-            self.isDirty = true
+            Task { @MainActor in
+                self?.isDirty = true
+            }
         }
         watcher?.start(repoPath: repoPath)
     }
@@ -375,7 +517,7 @@ class GitService {
     private func startFetchTimer() {
         stopFetchTimer()
         fetchTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { await self?.performFetch() }
+            Task { @MainActor in await self?.performFetch() }
         }
     }
 
@@ -386,12 +528,12 @@ class GitService {
 
     private func performFetch() async {
         guard !repoPath.isEmpty else { return }
-        let result = await runGit(["fetch", "--all", "--quiet"])
+        let result = await runGit(["fetch", "--all", "--quiet"], timeout: 60)
         guard result.exitCode == 0 else {
             let errorOutput = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             errorMessage = "Auto-fetch failed: \(errorOutput.isEmpty ? "Unknown error (exit code \(result.exitCode))" : errorOutput)"
             return
         }
-        if isPopoverVisible { await refresh() } else { isDirty = true }
+        if isPopoverVisible { await refreshSilently() } else { isDirty = true }
     }
 }

@@ -33,7 +33,10 @@ struct ContentView: View {
         .onChange(of: settingsService.selectedRepoPath) { _, newPath in
             if let path = newPath {
                 gitService.repoPath = path
-                Task { await gitService.refresh() }
+                gitService.isDirty = true
+                if gitService.isPopoverVisible {
+                    Task { await gitService.refreshAfterRepoSelection() }
+                }
             } else {
                 gitService.repoPath = ""
                 gitService.branches = []
@@ -77,15 +80,16 @@ struct ContentView: View {
                 if hasVisibleTabs {
                     tabBar
                     Divider().opacity(0.5)
-                    ZStack {
+                    // P2: Only render the active tab instead of all 4 via ZStack+opacity
+                    switch selectedTab {
+                    case .branches:
                         BranchesView()
-                            .opacity(selectedTab == .branches ? 1 : 0)
+                    case .worktrees:
                         WorktreesView()
-                            .opacity(selectedTab == .worktrees ? 1 : 0)
+                    case .stashes:
                         StashesView()
-                            .opacity(selectedTab == .stashes ? 1 : 0)
+                    case .pullRequests:
                         PullRequestsView()
-                            .opacity(selectedTab == .pullRequests ? 1 : 0)
                     }
                 } else {
                     allTabsHiddenState

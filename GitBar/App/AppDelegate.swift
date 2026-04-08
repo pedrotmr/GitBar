@@ -23,6 +23,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.contentSize = NSSize(width: 440, height: 500)
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: ContentView()
                 .environment(gitService)
@@ -44,7 +45,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let popover = popover {
             if popover.isShown {
                 popover.performClose(nil)
-                gitService.isPopoverVisible = false
             } else {
                 popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
                 NSApp.activate(ignoringOtherApps: true)
@@ -52,5 +52,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { await updateService.checkForUpdatesIfNeeded() }
             }
         }
+    }
+}
+
+// Track popover dismissal when user clicks outside (transient behavior)
+extension AppDelegate: NSPopoverDelegate {
+    func popoverDidClose(_ notification: Notification) {
+        gitService.isPopoverVisible = false
     }
 }
