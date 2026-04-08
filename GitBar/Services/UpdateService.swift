@@ -68,7 +68,9 @@ final class UpdateService {
 
         do {
             zipFile = try await downloadUpdateArchive(from: downloadURL)
-            let (appURL, extractDir) = try await unzipAndLocateApp(from: zipFile!)
+            let downloadedZip = try await downloadUpdateArchive(from: downloadURL)
+            zipFile = downloadedZip
+            let (appURL, extractDir) = try await unzipAndLocateApp(from: downloadedZip)
             extractionDir = extractDir
             try await verifyCodeSignature(of: appURL)
             try launchInstallerScript(newAppURL: appURL, targetAppURL: Bundle.main.bundleURL)
