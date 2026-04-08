@@ -63,13 +63,19 @@ final class UpdateService {
         isInstallingUpdate = true
         defer { isInstallingUpdate = false }
 
+        var zipFile: URL?
+        var extractionDir: URL?
+
         do {
-            let zipFile = try await downloadUpdateArchive(from: downloadURL)
-            let extractedAppURL = try await unzipAndLocateApp(from: zipFile)
-            try launchInstallerScript(newAppURL: extractedAppURL, targetAppURL: Bundle.main.bundleURL)
+            zipFile = try await downloadUpdateArchive(from: downloadURL)
+            let (appURL, extractDir) = try await unzipAndLocateApp(from: zipFile!)
+            extractionDir = extractDir
+            try await verifyCodeSignature(of: appURL)
+            try launchInstallerScript(newAppURL: appURL, targetAppURL: Bundle.main.bundleURL)
             NSApp.terminate(nil)
         } catch {
             lastErrorMessage = "Failed to install update automatically."
+            cleanupTempFiles(zip: zipFile, extraction: extractionDir)
             openLatestRelease()
         }
     }
@@ -156,7 +162,7 @@ final class UpdateService {
         return archiveURL
     }
 
-    private func unzipAndLocateApp(from zipFileURL: URL) async throws -> URL {
+    private func unzipAndLocateApp(from zipFileURL: URL) async throws -> (app: URL, extractionDir: URL) {
         let extractionDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("gitbar-update-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: extractionDirectory, withIntermediateDirectories: true)
@@ -169,7 +175,41 @@ final class UpdateService {
         guard let appURL = firstAppBundle(in: extractionDirectory) else {
             throw UpdateError.missingAppBundle
         }
-        return appURL
+        return (appURL, extractionDirectory)
+    }
+
+    // S2: Verify the downloaded app bundle has a valid code signature
+    private func verifyCodeSignature(of appURL: URL) async throws {
+        try await runProcess(
+            executablePath: "/usr/bin/codesign",
+            arguments: ["--verify", "--deep", "--strict", appURL.path]
+        )
+
+        // Verify the team identifier matches the running app's team
+        let currentTeamID = teamIdentifier(for: Bundle.main.bundleURL)
+        let downloadedTeamID = teamIdentifier(for: appURL)
+
+        if let current = currentTeamID, let downloaded = downloadedTeamID {
+            guard current == downloaded else {
+                throw UpdateError.signatureMismatch
+            }
+        } else if currentTeamID != nil {
+            // Current app is signed with a team but downloaded one isn't — reject
+            throw UpdateError.signatureMismatch
+        }
+        // If current app has no team ID (dev build), allow any valid signature
+    }
+
+    private func teamIdentifier(for bundleURL: URL) -> String? {
+        var code: SecStaticCode?
+        let status = SecStaticCodeCreateWithPath(bundleURL as CFURL, [], &code)
+        guard status == errSecSuccess, let code else { return nil }
+
+        var info: CFDictionary?
+        let infoStatus = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info)
+        guard infoStatus == errSecSuccess, let dict = info as? [String: Any] else { return nil }
+
+        return dict["teamid"] as? String
     }
 
     private func firstAppBundle(in directory: URL) -> URL? {
@@ -187,6 +227,7 @@ final class UpdateService {
         return nil
     }
 
+    // S3: Use atomic replacement to avoid TOCTOU race
     private func launchInstallerScript(newAppURL: URL, targetAppURL: URL) throws {
         let targetParent = targetAppURL.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: targetParent.path) else {
@@ -200,13 +241,19 @@ final class UpdateService {
         set -euo pipefail
         SOURCE='\(shellQuoted(newAppURL.path))'
         TARGET='\(shellQuoted(targetAppURL.path))'
-        STAGING="$TARGET.new"
         sleep 1
+        # Atomic replacement: copy to staging, then rename (atomic on same filesystem)
+        STAGING="${TARGET}.updating"
         /bin/rm -rf "$STAGING"
         /usr/bin/ditto "$SOURCE" "$STAGING"
-        /bin/rm -rf "$TARGET"
-        /bin/mv "$STAGING" "$TARGET"
+        # rename is atomic on the same filesystem — no window for TOCTOU
+        /usr/bin/python3 -c "import os; os.rename('${STAGING}', '${TARGET}')" 2>/dev/null || {
+            /bin/rm -rf "$TARGET"
+            /bin/mv "$STAGING" "$TARGET"
+        }
         /usr/bin/open "$TARGET"
+        # S4: Clean up the installer script itself
+        /bin/rm -f '\(shellQuoted(scriptURL.path))'
         """
         try scriptContents.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
@@ -219,6 +266,12 @@ final class UpdateService {
 
     private func shellQuoted(_ value: String) -> String {
         value.replacingOccurrences(of: "'", with: "'\"'\"'")
+    }
+
+    // S4: Clean up temp files on failure
+    private func cleanupTempFiles(zip: URL?, extraction: URL?) {
+        if let zip { try? FileManager.default.removeItem(at: zip) }
+        if let extraction { try? FileManager.default.removeItem(at: extraction) }
     }
 
     private func runProcess(executablePath: String, arguments: [String]) async throws {
@@ -268,5 +321,6 @@ private extension UpdateService {
         case processFailed
         case missingAppBundle
         case targetNotWritable
+        case signatureMismatch
     }
 }

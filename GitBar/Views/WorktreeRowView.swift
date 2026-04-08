@@ -162,11 +162,15 @@ struct WorktreeRowView: View {
             let cli = appURL.appendingPathComponent("Contents/Resources/bin/cmux")
             let p = Process()
             p.executableURL = cli
-            p.arguments = ["new-workspace", "--command", "cd '\(worktree.path)' && exec $SHELL"]
+            p.arguments = ["new-workspace", "--command", "cd '\(shellQuoted(worktree.path))' && exec $SHELL"]
             try? p.run()
         } else {
             NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: .init(), completionHandler: nil)
         }
+    }
+
+    private func shellQuoted(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "'\"'\"'")
     }
 
     private func openInEditor() {
