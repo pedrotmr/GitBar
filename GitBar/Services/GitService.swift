@@ -340,7 +340,7 @@ class GitService {
                 let reviewRaw = try JSONDecoder().decode([GHPRSimple].self, from: reviewData)
                 reviewRequestedNumbers = Set(reviewRaw.map(\.number))
             } catch {
-                print("[GitBar] Failed to parse team review requests: \(error.localizedDescription)")
+                appendError("Failed to parse team review requests: \(error.localizedDescription)")
             }
         }
 
